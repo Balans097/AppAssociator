@@ -2,23 +2,24 @@
 #       ПРИЛОЖЕНИЕ ДЛЯ СОХРАНЕНИЯ ФАЙЛОВЫХ АССОЦИАЦИЙ
 #               В WINDOWS 11 24H2 LTSC
 # 
-# Версия:   0.9
-# Дата:     2026-01-02
+# Версия:   1.0
+# Дата:     2026-02-01
 # Автор:    github.com/Balans097
 ################################################################
 
 
+# 1.0 — рефакторинг: вынесены registerXnview и registerNotepadpp (2026-02-01)
 # 0.9 — приложение начало работать (2026-02-01)
 # 0.1 — начальная реализация приложения (2026-01-31)
 
 
 
 # nim c -d:release AppAssociator.nim
-# nim c -d:release --app:gui AppAssociator.nim
+# nim c -d:release --app:gui --out:AppAssociatorNoCmd AppAssociator.nim
 
 
 # AppAssociator.nim
-# Перехват Paint (PBrush/mspaint.exe) и перенаправление на XnView
+# Перехват файловых ассоциаций для предотвращения их сброса на Windows 11 24H2 LTSC
 
 
 import std/[winlean, os, strformat]
@@ -26,6 +27,8 @@ import std/[winlean, os, strformat]
 const
   # Путь к XnView — поправьте при необходимости
   XNVIEW_PATH = r"D:\Software\XnView\xnview.exe"
+  # Путь к Notepad++ — поправьте при необходимости
+  NOTEPADPP_PATH = r"C:\Program Files\Notepad++\notepad++.exe"
 
 type
   HKEY = int
@@ -61,7 +64,12 @@ const
   SHCNE_ASSOCCHANGED = 0x08000000'i32
   SHCNF_IDLIST = 0x0000
 
+# ═══════════════════════════════════════════════════════════
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ═══════════════════════════════════════════════════════════
+
 proc setRegistryValue(rootKey: HKEY, path: string, valueName: string, value: string): bool =
+  ## Устанавливает значение в реестре Windows
   var hKey: HKEY
   var disposition: int32
 
@@ -92,73 +100,217 @@ proc setRegistryValue(rootKey: HKEY, path: string, valueName: string, value: str
   )
   setStatus == ERROR_SUCCESS
 
-proc verifyXnViewExists(): bool =
-  if not fileExists(XNVIEW_PATH):
-    echo "ОШИБКА: XnView не найден по пути: ", XNVIEW_PATH
+proc verifyProgramExists(programPath: string, programName: string): bool =
+  ## Проверяет существование программы по указанному пути
+  if not fileExists(programPath):
+    echo &"ОШИБКА: {programName} не найден по пути: {programPath}"
     return false
   true
 
-proc hijackPBrush(): bool =
-  echo "Перехватываю ProgID PBrush → XnView"
-  let base = r"Software\Classes\PBrush"
-
-  let commandPath = base & r"\shell\open\command"
-  let command = &"\"{XNVIEW_PATH}\" \"%1\""
-  if not setRegistryValue(HKEY_CURRENT_USER, commandPath, "", command):
-    echo "  ✗ Не удалось записать команду для PBrush"
-    return false
-
-  let iconPath = base & r"\DefaultIcon"
-  let icon = &"\"{XNVIEW_PATH}\",0"
-  discard setRegistryValue(HKEY_CURRENT_USER, iconPath, "", icon)
-
-  echo "  ✓ PBrush теперь запускает XnView"
-  true
-
-proc hijackMsPaintApp(): bool =
-  echo "Перехватываю Applications\\mspaint.exe → XnView"
-  let base = r"Software\Classes\Applications\mspaint.exe"
-
-  let commandPath = base & r"\shell\open\command"
-  let command = &"\"{XNVIEW_PATH}\" \"%1\""
-  if not setRegistryValue(HKEY_CURRENT_USER, commandPath, "", command):
-    echo "  ✗ Не удалось записать команду для mspaint.exe"
-    return false
-
-  let iconPath = base & r"\DefaultIcon"
-  let icon = &"\"{XNVIEW_PATH}\",0"
-  discard setRegistryValue(HKEY_CURRENT_USER, iconPath, "", icon)
-
-  echo "  ✓ mspaint.exe теперь запускает XnView"
-  true
-
-proc main() =
-  echo "═══════════════════════════════════════════════════════════"
-  echo "  AppAssociator: перехват Paint → XnView"
-  echo "═══════════════════════════════════════════════════════════"
-  echo ""
-
-  if not verifyXnViewExists():
-    echo "Исправь XNVIEW_PATH в исходнике и пересобери."
-    quit(1)
-
-  var ok = true
-  if not hijackPBrush():
-    ok = false
-  if not hijackMsPaintApp():
-    ok = false
-
+proc notifySystemAssocChanged() =
+  ## Уведомляет систему об изменении файловых ассоциаций
   echo ""
   echo "Уведомляю систему об изменении ассоциаций..."
   SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nil, nil)
   echo "✓ Explorer уведомлён"
   echo ""
 
-  if ok:
-    echo "Готово: любые вызовы Paint (PBrush/mspaint.exe) теперь открывают XnView."
-    echo "Если после перезагрузки .jpg/.png снова уйдут на Paint — фактически всё равно откроется XnView."
+# ═══════════════════════════════════════════════════════════
+# ФУНКЦИЯ РЕГИСТРАЦИИ XNVIEW
+# ═══════════════════════════════════════════════════════════
+
+proc registerXnview(xnviewPath: string): bool =
+  ## Перехватывает ассоциации графических файлов для XnView
+  ## Перенаправляет вызовы Paint (PBrush/mspaint.exe) на XnView
+  ## 
+  ## Параметры:
+  ##   xnviewPath - полный путь к исполняемому файлу XnView
+  ## 
+  ## Возвращает:
+  ##   true при успешной регистрации, false при ошибках
+  
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Регистрация XnView"
+  echo "═══════════════════════════════════════════════════════════"
+  
+  if not verifyProgramExists(xnviewPath, "XnView"):
+    return false
+
+  var ok = true
+
+  # Перехват ProgID PBrush
+  echo "Перехватываю ProgID PBrush → XnView"
+  let pbrushBase = r"Software\Classes\PBrush"
+  let pbrushCommandPath = pbrushBase & r"\shell\open\command"
+  let pbrushCommand = &"\"{xnviewPath}\" \"%1\""
+  
+  if not setRegistryValue(HKEY_CURRENT_USER, pbrushCommandPath, "", pbrushCommand):
+    echo "  ✗ Не удалось записать команду для PBrush"
+    ok = false
   else:
-    echo "Были ошибки при записи в реестр. Попробуй запустить от имени текущего пользователя без UAC-блокировок."
+    let pbrushIconPath = pbrushBase & r"\DefaultIcon"
+    let pbrushIcon = &"\"{xnviewPath}\",0"
+    discard setRegistryValue(HKEY_CURRENT_USER, pbrushIconPath, "", pbrushIcon)
+    echo "  ✓ PBrush теперь запускает XnView"
+
+  # Перехват Applications\mspaint.exe
+  echo "Перехватываю Applications\\mspaint.exe → XnView"
+  let mspaintBase = r"Software\Classes\Applications\mspaint.exe"
+  let mspaintCommandPath = mspaintBase & r"\shell\open\command"
+  let mspaintCommand = &"\"{xnviewPath}\" \"%1\""
+  
+  if not setRegistryValue(HKEY_CURRENT_USER, mspaintCommandPath, "", mspaintCommand):
+    echo "  ✗ Не удалось записать команду для mspaint.exe"
+    ok = false
+  else:
+    let mspaintIconPath = mspaintBase & r"\DefaultIcon"
+    let mspaintIcon = &"\"{xnviewPath}\",0"
+    discard setRegistryValue(HKEY_CURRENT_USER, mspaintIconPath, "", mspaintIcon)
+    echo "  ✓ mspaint.exe теперь запускает XnView"
+
+  if ok:
+    echo ""
+    echo "✓ XnView успешно зарегистрирован"
+    echo "  Любые вызовы Paint (PBrush/mspaint.exe) теперь открывают XnView"
+
+  return ok
+
+# ═══════════════════════════════════════════════════════════
+# ФУНКЦИЯ РЕГИСТРАЦИИ NOTEPAD++
+# ═══════════════════════════════════════════════════════════
+
+proc registerNotepadpp(notepadppPath: string): bool =
+  ## Создаёт ассоциации файлов .txt и .log с Notepad++
+  ## Заменяет стандартный notepad.exe Windows
+  ## 
+  ## Параметры:
+  ##   notepadppPath - полный путь к исполняемому файлу Notepad++
+  ## 
+  ## Возвращает:
+  ##   true при успешной регистрации, false при ошибках
+  
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Регистрация Notepad++"
+  echo "═══════════════════════════════════════════════════════════"
+  
+  if not verifyProgramExists(notepadppPath, "Notepad++"):
+    return false
+
+  var ok = true
+
+  # Создаём собственный ProgID для Notepad++
+  let progId = "Notepadpp.TextFile"
+  let progIdBase = &r"Software\Classes\{progId}"
+  
+  echo "Создаю ProgID для Notepad++"
+  if not setRegistryValue(HKEY_CURRENT_USER, progIdBase, "", "Text Document (Notepad++)"):
+    echo "  ✗ Не удалось создать ProgID"
+    ok = false
+  else:
+    # Команда открытия
+    let commandPath = progIdBase & r"\shell\open\command"
+    let command = &"\"{notepadppPath}\" \"%1\""
+    if not setRegistryValue(HKEY_CURRENT_USER, commandPath, "", command):
+      echo "  ✗ Не удалось записать команду открытия"
+      ok = false
+    
+    # Иконка
+    let iconPath = progIdBase & r"\DefaultIcon"
+    let icon = &"\"{notepadppPath}\",0"
+    discard setRegistryValue(HKEY_CURRENT_USER, iconPath, "", icon)
+    
+    echo "  ✓ ProgID создан"
+
+  # Ассоциация для .txt файлов
+  echo "Ассоциирую расширение .txt с Notepad++"
+  let txtPath = r"Software\Classes\.txt"
+  if not setRegistryValue(HKEY_CURRENT_USER, txtPath, "", progId):
+    echo "  ✗ Не удалось ассоциировать .txt"
+    ok = false
+  else:
+    echo "  ✓ .txt ассоциирован с Notepad++"
+
+  # Ассоциация для .log файлов
+  echo "Ассоциирую расширение .log с Notepad++"
+  let logPath = r"Software\Classes\.log"
+  if not setRegistryValue(HKEY_CURRENT_USER, logPath, "", progId):
+    echo "  ✗ Не удалось ассоциировать .log"
+    ok = false
+  else:
+    echo "  ✓ .log ассоциирован с Notepad++"
+
+  # Перехват notepad.exe (опционально)
+  echo "Перехватываю Applications\\notepad.exe → Notepad++"
+  let notepadBase = r"Software\Classes\Applications\notepad.exe"
+  let notepadCommandPath = notepadBase & r"\shell\open\command"
+  let notepadCommand = &"\"{notepadppPath}\" \"%1\""
+  
+  if not setRegistryValue(HKEY_CURRENT_USER, notepadCommandPath, "", notepadCommand):
+    echo "  ✗ Не удалось перехватить notepad.exe"
+    # Не критично для основной функциональности
+  else:
+    let notepadIconPath = notepadBase & r"\DefaultIcon"
+    let notepadIcon = &"\"{notepadppPath}\",0"
+    discard setRegistryValue(HKEY_CURRENT_USER, notepadIconPath, "", notepadIcon)
+    echo "  ✓ notepad.exe теперь запускает Notepad++"
+
+  if ok:
+    echo ""
+    echo "✓ Notepad++ успешно зарегистрирован"
+    echo "  Файлы .txt и .log теперь открываются в Notepad++"
+
+  return ok
+
+# ═══════════════════════════════════════════════════════════
+# ГЛАВНАЯ ФУНКЦИЯ
+# ═══════════════════════════════════════════════════════════
+
+proc main() =
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  AppAssociator v1.0"
+  echo "  Защита файловых ассоциаций на Windows 11 24H2 LTSC"
+  echo "═══════════════════════════════════════════════════════════"
+  echo ""
+
+  var allOk = true
+
+  # Регистрация XnView
+  if not registerXnview(XNVIEW_PATH):
+    allOk = false
+  
+  echo ""
+  
+  # Регистрация Notepad++
+  if not registerNotepadpp(NOTEPADPP_PATH):
+    allOk = false
+
+  # Уведомление системы
+  notifySystemAssocChanged()
+
+  # Итоговое сообщение
+  if allOk:
+    echo "═══════════════════════════════════════════════════════════"
+    echo "✓ ВСЕ АССОЦИАЦИИ УСПЕШНО ЗАРЕГИСТРИРОВАНЫ"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    echo "XnView:"
+    echo "  • Графические файлы через Paint → XnView"
+    echo ""
+    echo "Notepad++:"
+    echo "  • .txt и .log файлы → Notepad++"
+    echo "  • Вызовы notepad.exe → Notepad++"
+    echo ""
+    echo "Если после перезагрузки ассоциации снова сбросятся,"
+    echo "фактически программы всё равно откроются правильно."
+  else:
+    echo "═══════════════════════════════════════════════════════════"
+    echo "⚠ БЫЛИ ОШИБКИ ПРИ РЕГИСТРАЦИИ"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    echo "Возможные причины:"
+    echo "  • Неверные пути к программам (проверь константы)"
+    echo "  • Недостаточно прав (попробуй запустить от администратора)"
+    echo "  • Блокировка UAC или антивирусом"
 
 when isMainModule:
   main()
