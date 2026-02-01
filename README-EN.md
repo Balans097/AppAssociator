@@ -1,7 +1,6 @@
 # AppAssociator
 
-AppAssociator — a small utility for Windows 11 (including 24H2 LTSC) that redirects calls to the classic Paint (`mspaint.exe` / ProgID `PBrush`) to **XnView**.  
-In other words, it makes Windows launch **XnView** instead of the built-in Microsoft Paint whenever Paint would normally be started.
+AppAssociator — a small utility for Windows 11 (including 24H2 LTSC) that redirects calls to the classic Paint (`mspaint.exe` / ProgID `PBrush`) to **XnView**. In other words, it makes Windows launch **XnView** instead of the built-in Microsoft Paint whenever Paint would normally be started.
 
 In the future the program may be extended to support redirection to other image viewers/editors.
 
